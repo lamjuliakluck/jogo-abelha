@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Abelha Polinizadora</title>
+<style>
+:root{--ink:#5a3e00;--honey:#f5b700;--card:#fffdf2}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:#fff6d0;font-family:ui-rounded,"Nunito","Trebuchet MS",system-ui,sans-serif;color:var(--ink);overscroll-behavior:none;touch-action:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:none}
+#hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;gap:6px;padding:max(10px,env(safe-area-inset-top)) 10px 0;pointer-events:none;z-index:2}
+.pill{background:var(--card);border:2px solid var(--honey);border-radius:999px;padding:5px 12px;font-weight:800;font-size:clamp(13px,3.8vw,19px);box-shadow:0 2px 0 rgba(245,183,0,.5);font-variant-numeric:tabular-nums;white-space:nowrap}
+#aviso{position:fixed;top:calc(max(10px,env(safe-area-inset-top)) + 48px);left:50%;transform:translate(-50%,-8px);opacity:0;transition:.2s;background:#fff1c9;border:2px solid #e8641a;color:#8a3a00;font-weight:800;border-radius:14px;padding:6px 14px;font-size:clamp(14px,4vw,18px);z-index:2;pointer-events:none;text-align:center;max-width:92vw}
+#aviso.on{opacity:1;transform:translate(-50%,0)}
+#overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,243,180,.78);z-index:3;padding:16px}
+#overlay.hide{display:none}
+.card{background:var(--card);border:3px solid var(--honey);border-radius:26px;padding:22px 22px 24px;max-width:430px;width:100%;max-height:92vh;overflow:auto;touch-action:pan-y;text-align:center;box-shadow:0 6px 0 rgba(245,183,0,.6)}
+.tag{display:inline-block;background:#ffe9a0;border-radius:999px;padding:3px 12px;font-weight:800;font-size:14px;color:#8a5a00;margin-bottom:6px}
+h1{margin:2px 0 8px;font-size:clamp(24px,7vw,32px);line-height:1.15}
+p{margin:8px 0;line-height:1.45;font-size:clamp(15px,4vw,17px)}
+.big{font-size:clamp(34px,10vw,48px);font-weight:800;margin:4px 0}
+.row{display:flex;justify-content:space-between;gap:10px;padding:6px 2px;border-bottom:2px dotted #f0d27a;font-size:15px;text-align:left}
+button{margin-top:16px;font:inherit;font-weight:800;font-size:clamp(18px,5vw,22px);color:var(--ink);background:var(--honey);border:0;border-radius:16px;padding:12px 32px;cursor:pointer;box-shadow:0 4px 0 #c48f00}
+button:active{transform:translateY(3px);box-shadow:0 1px 0 #c48f00}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="pill">Fase <span id="fase">1</span>/5</div>
+  <div class="pill">⏱ <span id="tempo">0,0</span> s</div>
+  <div class="pill">🌼 <span id="cont">0/0</span></div>
+</div>
+<div id="aviso"></div>
+<div id="overlay"><div class="card" id="card"></div></div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const $fase = $('fase'), $tempo = $('tempo'), $cont = $('cont'), $aviso = $('aviso'), overlay = $('overlay'), card = $('card');
+const TAU = Math.PI * 2, clamp = (v, a, b) => Math.max(a, Math.min(b, v)), lerp = (a, b, t) => a + (b - a) * t;
+const fmt = s => s.toFixed(1).replace('.', ',');
+const seed = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const windAt = t => (Math.sin(t * .55) * .7 + Math.sin(t * 1.37 + 1.3) * .45 + Math.sin(t * 2.9) * .15) / 1.15;
+
+const PHASES = [
+  { nome: 'Jardim tranquilo', desc: 'Nenhum perigo por aqui. Aqueça as asinhas e polinize todas as flores.', n: [4, 3], wind: 0, spiders: 0, hand: 0 },
+  { nome: 'Ventania', desc: 'O vento balança as flores e leva a abelha devagar para trás sempre que você para de mexer o cursor. Continue se movendo!', n: [5, 4], wind: .8, spiders: 0, hand: 0 },
+  { nome: 'Aranha-caranguejo', desc: 'Uma aranha-caranguejo se esconde nas flores e pula na abelha enquanto ela poliniza. Quando ela se agitar, saia de perto!', n: [6, 4], wind: .8, spiders: 1, spiderCd: 3, alert: .75, reach: 380, hand: 0 },
+  { nome: 'A mão', desc: 'Uma mão humana tenta espantar a abelha. Quando a faixa de aviso aparecer, saia dela!', n: [7, 5], wind: .9, spiders: 1, spiderCd: 2.6, alert: .65, reach: 380, hand: 1, handCd: 6, handWarn: 1.2, handSpeed: 1300 },
+  { nome: 'Jardim selvagem', desc: 'Vento forte, duas aranhas e uma mão mais rápida. Boa sorte, abelhinha!', n: [8, 6], wind: 1.3, spiders: 2, spiderCd: 2, alert: .55, reach: 460, hand: 1, handCd: 3.8, handWarn: .95, handSpeed: 1700 }
+];
+const LAVC = [['rgba(172,148,232,.78)', 'rgba(110,90,190,.45)'], ['rgba(236,150,196,.78)', 'rgba(190,90,150,.45)'], ['rgba(132,152,236,.78)', 'rgba(80,100,190,.45)']];
+
+let W = 0, H = 0, dpr = 1, T = 0, last = 0, lastMove = 0, ptrX = 0, ptrY = 0, phase = 0, running = false, phaseTime = 0, base = 0, times = [], wind = 0, windDir = 1, pollIdx = -1, toastT = 0;
+let flowers = [], lav = [], particles = [], spiders = [], streaks = [], bgC, fgC;
+const bee = { x: 0, y: 0, tx: 0, ty: 0, vx: 0, vy: 0, wing: 0, face: 1, stun: 0, inv: 0, s: 1 };
+const hand = { st: 'idle', t: 0, cd: 5, y: 0, dir: 1, x: 0, hit: false, dur: 1 };
+
+const getBest = () => { try { return parseFloat(localStorage.getItem('abelha_jardim_best')) || null; } catch (e) { return null; } };
+const setBest = v => { try { localStorage.setItem('abelha_jardim_best', v); } catch (e) {} };
+function aviso(t, ms = 1500) { $aviso.textContent = t; $aviso.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => $aviso.classList.remove('on'), ms); }
+
+/* ---------- Aquarela: formas e fundo ---------- */
+function blob(g, x, y, rx, ry, rot, rg, w) {
+  const N = 14, p = [];
+  for (let i = 0; i < N; i++) { const a = i / N * TAU, k = 1 + (rg() - .5) * w * 2; p.push([Math.cos(a) * rx * k, Math.sin(a) * ry * k]); }
+  const m = i => { const a = p[i], b = p[(i + 1) % N]; return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; };
+  g.save(); g.translate(x, y); g.rotate(rot); g.beginPath();
+  const s = m(N - 1); g.moveTo(s[0], s[1]);
+  for (let i = 0; i < N; i++) { const e = m(i); g.quadraticCurveTo(p[i][0], p[i][1], e[0], e[1]); }
+  g.closePath(); g.restore();
+}
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr); return [c, g]; }
+
+function buildBg() {
+  const r = seed(7); let g;
+  [bgC, g] = mk(W, H);
+  const sk = g.createLinearGradient(0, 0, 0, H); sk.addColorStop(0, '#fff3c0'); sk.addColorStop(.55, '#fffbe8'); sk.addColorStop(1, '#fff6d6');
+  g.fillStyle = sk; g.fillRect(0, 0, W, H);
+  const sun = g.createRadialGradient(W * .85, H * .1, 0, W * .85, H * .1, Math.min(W, H) * .5);
+  sun.addColorStop(0, 'rgba(255,214,70,.55)'); sun.addColorStop(1, 'rgba(255,214,70,0)'); g.fillStyle = sun; g.fillRect(0, 0, W, H);
+  const cols = ['255,214,100', '255,196,140', '206,230,150', '255,232,150'];
+  for (let i = 0; i < 30; i++) {
+    const c = cols[i % 4], x = r() * W, y = r() * H * .85, s = 60 + r() * 150;
+    for (let k = 0; k < 2; k++) {
+      blob(g, x + k * 8, y + k * 6, s, s * (.5 + r() * .4), r() * 3, r, .2);
+      g.fillStyle = `rgba(${c},${.05 + r() * .07})`; g.fill();
+      if (k) { g.strokeStyle = `rgba(${c},.12)`; g.lineWidth = 1.5; g.stroke(); }
+    }
+  }
+  const gr = g.createLinearGradient(0, H - 130, 0, H); gr.addColorStop(0, 'rgba(150,200,100,0)'); gr.addColorStop(1, 'rgba(120,180,85,.7)');
+  g.fillStyle = gr; g.fillRect(0, H - 130, W, 130);
+  const greens = ['143,193,106', '111,174,85', '181,215,122', '96,160,90'];
+  for (let x = -10; x < W + 10; x += 7) {
+    const h = 18 + r() * 46; g.fillStyle = `rgba(${greens[(r() * 4) | 0]},.55)`;
+    g.beginPath(); g.moveTo(x, H - 20); g.quadraticCurveTo(x + (r() - .5) * 14, H - 20 - h * .6, x + (r() - .5) * 22, H - 20 - h); g.lineTo(x + 6, H - 20); g.fill();
+  }
+  for (let i = 0; i < Math.round(W / 70) + 2; i++) {
+    const x = r() * W, y = H - 22 - r() * 26, rot = -(.5 + r() * 2.1), rx = 34 + r() * 22, ry = 13 + r() * 6;
+    const cx = x + Math.cos(rot) * rx, cy = y + Math.sin(rot) * rx;
+    blob(g, cx, cy, rx, ry, rot, r, .12); g.fillStyle = 'rgba(110,175,80,.6)'; g.fill(); g.strokeStyle = 'rgba(70,130,55,.5)'; g.lineWidth = 1.5; g.stroke();
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(rot) * rx * 1.8, y + Math.sin(rot) * rx * 1.8); g.strokeStyle = 'rgba(70,130,55,.35)'; g.stroke();
+  }
+  for (let i = 0; i < W * H / 60; i++) { g.fillStyle = `rgba(120,90,30,${.02 + r() * .03})`; g.fillRect(r() * W, r() * H, 1.2, 1.2); }
+  [fgC, g] = mk(W, H);
+  for (let x = -6; x < W + 6; x += 9) {
+    const h = 10 + r() * 20; g.fillStyle = `rgba(${greens[(r() * 4) | 0]},.9)`;
+    g.beginPath(); g.moveTo(x, H + 2); g.quadraticCurveTo(x + (r() - .5) * 10, H - h * .6, x + (r() - .5) * 16, H - h); g.lineTo(x + 8, H + 2); g.fill();
+  }
+}
+function buildLav() {
+  const r = seed(11), n = Math.max(3, Math.round(W / 115)); lav = [];
+  for (let i = 0; i < n; i++) lav.push({ x: (i + .3 + r() * .5) / n * W, h: H * (.2 + r() * .2), ph: r() * 6, k: (r() * 3) | 0 });
+  streaks = Array.from({ length: 14 }, () => ({ x: Math.random() * W, y: Math.random() * H * .85, l: 60 + Math.random() * 90 }));
+}
+
+/* ---------- Flores (sprites em aquarela) ---------- */
+function sprite(S, fn) { const c = document.createElement('canvas'); c.width = c.height = Math.ceil(S * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr); fn(g, S / 2); return c; }
+function head(g, c, r, type, done) {
+  const rg = seed(Math.random() * 1e9 | 0);
+  if (done) { const gl = g.createRadialGradient(c, c, r * .3, c, c, r * 1.6); gl.addColorStop(0, 'rgba(255,214,70,.55)'); gl.addColorStop(1, 'rgba(255,214,70,0)'); g.fillStyle = gl; g.beginPath(); g.arc(c, c, r * 1.6, 0, TAU); g.fill(); }
+  if (type === 'daisy') {
+    for (let i = 0; i < 13; i++) {
+      const a = i / 13 * TAU + rg() * .08, dx = Math.cos(a), dy = Math.sin(a);
+      blob(g, c + dx * r * .66, c + dy * r * .66, r * .52, r * .2, a, rg, .08);
+      const gr = g.createLinearGradient(c + dx * r * .1, c + dy * r * .1, c + dx * r * 1.18, c + dy * r * 1.18);
+      gr.addColorStop(0, done ? '#ffcf5c' : 'rgba(255,236,150,.96)'); gr.addColorStop(1, done ? '#ffe9a8' : 'rgba(255,255,250,.97)');
+      g.fillStyle = gr; g.fill(); g.strokeStyle = done ? 'rgba(229,154,20,.9)' : 'rgba(235,178,62,.85)'; g.lineWidth = 1.5; g.stroke();
+    }
+    const cg = g.createRadialGradient(c - r * .08, c - r * .08, 1, c, c, r * .36); cg.addColorStop(0, done ? '#fff3b0' : '#ffd23f'); cg.addColorStop(1, done ? '#ffc22e' : '#f2a413');
+    g.fillStyle = cg; g.beginPath(); g.arc(c, c, r * .34, 0, TAU); g.fill(); g.strokeStyle = 'rgba(200,120,10,.55)'; g.lineWidth = 1.3; g.stroke();
+    g.fillStyle = 'rgba(190,100,10,.5)'; for (let i = 0; i < 9; i++) { g.beginPath(); g.arc(c + (rg() - .5) * r * .45, c + (rg() - .5) * r * .45, 1.2, 0, TAU); g.fill(); }
+  } else {
+    let k = type === 'red' ? ['#ff9d8a', '#ee5a4e', '#c93a3a'] : ['#ffc2dc', '#ee8fb9', '#c8648f'];
+    if (done) k = ['#fff0a8', '#ffc64a', '#e8961a'];
+    for (let L = 0; L < 2; L++) {
+      const N = L ? 5 : 6;
+      for (let i = 0; i < N; i++) {
+        const a = i / N * TAU + L * .5 + rg() * .1, d = r * (L ? .3 : .52), pr = r * (L ? .4 : .56), px = c + Math.cos(a) * d, py = c + Math.sin(a) * d;
+        blob(g, px, py, pr, pr * .92, a, rg, .1);
+        const gr = g.createRadialGradient(c, c, r * .1, px, py, pr * 1.1); gr.addColorStop(0, k[0]); gr.addColorStop(1, k[1]);
+        g.globalAlpha = L ? .7 : .9; g.fillStyle = gr; g.fill(); g.globalAlpha = .6; g.strokeStyle = k[2]; g.lineWidth = 1.5; g.stroke(); g.globalAlpha = 1;
+      }
+    }
+    g.fillStyle = '#fff1dd'; g.beginPath(); g.arc(c, c, r * .2, 0, TAU); g.fill();
+    for (let i = 0; i < 9; i++) { const a = i / 9 * TAU; g.fillStyle = i % 2 ? '#f5c04a' : k[2]; g.beginPath(); g.arc(c + Math.cos(a) * r * .2, c + Math.sin(a) * r * .2, 1.7, 0, TAU); g.fill(); }
+  }
+}
+function buildFlowers() {
+  const P = PHASES[phase], n = P.n[W < 520 ? 1 : 0], r = clamp(W / (n * 2.9), 19, 34);
+  const m = r + 16, step = (W - 2 * m) / (n - 1), types = ['daisy', 'red', 'pink']; flowers = [];
+  for (let i = 0; i < n; i++) {
+    const x = m + step * i + (Math.random() - .5) * step * .2, minY = Math.max(H * .5, 110), maxY = H - 105 - r, y = minY + Math.random() * Math.max(10, maxY - minY), type = types[(Math.random() * 3) | 0];
+    const f = { x, y, r, type, prog: 0, done: false, ph: Math.random() * 6.3, hx: x, hy: y, hg: clamp((H - 26 - y) / (H * .35), .6, 1.4) };
+    f.sp = [0, 1].map(d => sprite(r * 3.4, (g, c) => head(g, c, r, type, !!d)));
+    flowers.push(f);
+  }
+}
+
+/* ---------- Aranha ---------- */
+const mkSpider = () => ({ st: 'idle', home: -1, pend: -1, x: 0, y: 0, t: 0, cd: 2, fx: 0, fy: 0, tx: 0, ty: 0, dur: .5, vx: 0, vy: 0, rot: 0, p: 0 });
+function pickHome(s, rand) {
+  const c = []; flowers.forEach((f, i) => { if (!f.done && !spiders.some(o => o !== s && (o.home === i || o.pend === i))) c.push(i); });
+  if (!c.length) return -1; if (rand) return c[(Math.random() * c.length) | 0];
+  let b = c[0], bd = 1e9; for (const i of c) { const d = Math.hypot(flowers[i].hx - bee.x, flowers[i].hy - bee.y); if (d < bd) { bd = d; b = i; } } return b;
+}
+function hop(s, i) { const f = flowers[i]; s.st = 'hop'; s.t = 0; s.dur = .55; s.fx = s.x; s.fy = s.y; s.tx = f.hx; s.ty = f.hy; s.pend = i; }
+function hurt(stun, msg) { bee.stun = stun; bee.inv = stun + 1.2; flowers.forEach(f => { if (!f.done) f.prog = 0; }); aviso(msg); }
+function updateSpiders(dt) {
+  const P = PHASES[phase];
+  for (const s of spiders) {
+    if (s.st === 'gone') continue;
+    if (s.st === 'idle') {
+      const h = flowers[s.home];
+      if (!h || h.done) { const n = pickHome(s, false); if (n < 0) { s.st = 'gone'; continue; } s.home = -1; hop(s, n); continue; }
+      s.x = h.hx - h.r * .25; s.y = h.hy - h.r * .1; s.rot = Math.atan2(bee.y - s.y, bee.x - s.x);
+      if (!running) continue;
+      s.cd -= dt; if (s.cd > 0) continue;
+      const d = Math.hypot(bee.x - s.x, bee.y - s.y);
+      if (pollIdx >= 0 && d < P.reach && bee.stun <= 0) { s.st = 'alert'; s.t = 0; aviso('⚠ Cuidado: aranha!'); }
+      else if (d > P.reach) { s.cd = 2.2; const n = pickHome(s, false); if (n >= 0 && n !== s.home) { s.home = -1; hop(s, n); } }
+    } else if (s.st === 'alert') {
+      s.t += dt; const h = flowers[s.home]; if (h) { s.x = h.hx - h.r * .25; s.y = h.hy - h.r * .1; }
+      s.rot = Math.atan2(bee.y - s.y, bee.x - s.x);
+      if (s.t >= P.alert) { s.st = 'jump'; s.t = 0; s.dur = .42; s.fx = s.x; s.fy = s.y; s.tx = bee.x; s.ty = bee.y; s.home = -1; }
+    } else if (s.st === 'jump' || s.st === 'hop') {
+      s.t += dt; const p = Math.min(1, s.t / s.dur); s.p = p; s.x = lerp(s.fx, s.tx, p); s.y = lerp(s.fy, s.ty, p); s.rot = Math.atan2(s.ty - s.fy, s.tx - s.fx);
+      if (p >= 1) {
+        if (s.st === 'hop') { s.home = s.pend; s.pend = -1; s.st = 'idle'; s.cd = (P.spiderCd || 3) * (.8 + Math.random() * .5); }
+        else if (running && bee.inv <= 0 && bee.stun <= 0 && Math.hypot(s.x - bee.x, s.y - bee.y) < 34 * bee.s) { hurt(1.1, 'A aranha pegou a abelha!'); s.st = 'stuck'; }
+        else { s.st = 'fall'; s.vy = 0; s.vx = (s.tx - s.fx) * .5; }
+      }
+    } else if (s.st === 'stuck') {
+      s.x = bee.x; s.y = bee.y - 18 * bee.s; if (bee.stun <= 0) { s.st = 'fall'; s.vy = 0; s.vx = 0; }
+    } else if (s.st === 'fall') {
+      s.vy += 1500 * dt; s.y += s.vy * dt; s.x += s.vx * dt; if (s.y >= H - 38) { s.y = H - 38; s.st = 'wait'; s.t = 0; }
+    } else if (s.st === 'wait') {
+      s.t += dt; if (s.t > .5) { const n = pickHome(s, false); if (n < 0) s.st = 'gone'; else hop(s, n); }
+    }
+  }
+}
+function drawSpider(x, y, rot, s, al) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(s, s);
+  const wob = al ? Math.sin(T * 50) * 1.5 : 0;
+  ctx.strokeStyle = '#c8b06a'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const bx = [6, 2, -2, -6], k1 = [12, 6, -4, -10], ky = [10, 11, 11, 10], f1 = [22, 16, -9, -17], fy = [17, 18, 17, 15];
+  for (const sd of [-1, 1]) for (let i = 0; i < 4; i++) { const up = i < 2 && al ? -4 : 0; ctx.beginPath(); ctx.moveTo(bx[i], 0); ctx.lineTo(bx[i] + k1[i], sd * (ky[i] + up)); ctx.lineTo(bx[i] + f1[i], sd * fy[i]); ctx.stroke(); }
+  ctx.fillStyle = '#f6eec8'; ctx.strokeStyle = '#cdb86c'; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.ellipse(-6, wob, 10, 8, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#d08a5a'; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.arc(-6, wob, 6.5, -1.2, -.3); ctx.stroke(); ctx.beginPath(); ctx.arc(-6, wob, 6.5, .3, 1.2); ctx.stroke();
+  ctx.fillStyle = '#efe3b0'; ctx.strokeStyle = '#cdb86c'; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.arc(5, 0, 5.5, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#4a2a14'; for (const sy of [-2, 2]) { ctx.beginPath(); ctx.arc(8, sy, 1.3, 0, TAU); ctx.fill(); }
+  ctx.restore();
+}
+function drawSp(s) {
+  let y = s.y, sc = 1.35;
+  if (s.st === 'jump' || s.st === 'hop') { y -= Math.sin(Math.PI * s.p) * (s.st === 'jump' ? 70 : 50); sc *= 1 + .25 * Math.sin(Math.PI * s.p); }
+  drawSpider(s.x, y, s.rot, sc, s.st === 'alert');
+  if (s.st === 'alert') { ctx.fillStyle = '#e8441a'; ctx.font = '800 26px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('!', s.x, s.y - 28); }
+}
+
+/* ---------- Mão ---------- */
+function updateHand(dt) {
+  const P = PHASES[phase];
+  if (hand.st === 'idle') { hand.cd -= dt; if (hand.cd <= 0) { hand.st = 'warn'; hand.t = 0; hand.dir = Math.random() < .5 ? 1 : -1; hand.y = bee.y; aviso('✋ Mão chegando! Saia da faixa'); } }
+  else if (hand.st === 'warn') {
+    hand.t += dt; if (hand.t < P.handWarn - .35) hand.y += (bee.y - hand.y) * Math.min(1, dt * 6);
+    if (hand.t >= P.handWarn) { hand.st = 'sweep'; hand.t = 0; hand.hit = false; hand.dur = (W + 550) / P.handSpeed; }
+  } else if (hand.st === 'sweep') {
+    hand.t += dt; const p = Math.min(1, hand.t / hand.dur);
+    hand.x = hand.dir > 0 ? lerp(-110, W + 440, p) : lerp(W + 110, -440, p);
+    const lx = (bee.x - hand.x) * hand.dir;
+    if (running && !hand.hit && bee.inv <= 0 && lx > -420 && lx < 100 && Math.abs(bee.y - hand.y) < 48) {
+      hand.hit = true; hurt(.9, 'Ai! A mão espantou a abelha'); bee.vx += hand.dir * 1100; bee.vy += (bee.y < hand.y ? -1 : 1) * 220;
+    }
+    if (p >= 1) { hand.st = 'idle'; hand.cd = P.handCd * (.8 + Math.random() * .5); }
+  }
+}
+function cap(x1, y1, x2, y2, w) { ctx.lineWidth = w + 3; ctx.strokeStyle = '#d79c6e'; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.lineWidth = w; ctx.strokeStyle = '#f7d2ae'; ctx.stroke(); }
+function drawHand() {
+  if (hand.st !== 'sweep') return;
+  ctx.save(); ctx.translate(hand.x, hand.y); ctx.scale(hand.dir, 1); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.fillStyle = '#86a9e3'; ctx.strokeStyle = '#5f83c4'; ctx.lineWidth = 2; ctx.fillRect(-420, -30, 330, 60); ctx.strokeRect(-420, -30, 330, 60);
+  ctx.fillStyle = '#eaf1ff'; ctx.fillRect(-100, -33, 16, 66); ctx.strokeRect(-100, -33, 16, 66);
+  cap(-84, 0, -50, 0, 40);
+  const L = [60, 72, 66, 52];
+  for (let i = 0; i < 4; i++) { const y = -24 + i * 16, a = (i - 1.5) * .1 + Math.sin(T * 16 + i) * .03; cap(10, y, 10 + Math.cos(a) * L[i], y + Math.sin(a) * L[i], 14); }
+  cap(-34, -28, -6, -62, 16);
+  const x = -62, y = -33, w = 80, h = 66, r = 18;
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  ctx.fillStyle = '#f7d2ae'; ctx.strokeStyle = '#d79c6e'; ctx.lineWidth = 2; ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function drawWarn() {
+  if (hand.st !== 'warn') return;
+  ctx.fillStyle = `rgba(232,100,40,${.12 + .1 * Math.sin(T * 18)})`; ctx.fillRect(0, hand.y - 50, W, 100);
+  ctx.strokeStyle = 'rgba(232,100,40,.55)'; ctx.lineWidth = 2; ctx.setLineDash([10, 8]); ctx.strokeRect(-2, hand.y - 50, W + 4, 100); ctx.setLineDash([]);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '34px serif'; ctx.fillStyle = '#000'; ctx.fillText('✋', hand.dir > 0 ? 28 : W - 28, hand.y);
+  ctx.font = '800 30px sans-serif'; ctx.fillStyle = 'rgba(200,70,20,.8)'; ctx.fillText(hand.dir > 0 ? '»»' : '««', hand.dir > 0 ? 80 : W - 80, hand.y);
+}
+
+/* ---------- Abelha ---------- */
+function drawBee() {
+  const s = bee.s, tilt = clamp(bee.vx / 1400, -.45, .45);
+  ctx.save(); ctx.translate(bee.x, bee.y + Math.sin(T * 9) * 1.6); ctx.rotate(tilt); ctx.scale(s * bee.face, s);
+  ctx.fillStyle = 'rgba(196,190,255,.5)'; ctx.beginPath(); ctx.arc(0, 0, 29, 0, TAU); ctx.fill();
+  const fl = Math.sin(bee.wing) * .3;
+  ctx.fillStyle = 'rgba(255,255,255,.92)'; ctx.strokeStyle = 'rgba(176,168,236,.8)'; ctx.lineWidth = 1.6;
+  for (const sd of [-1, 1]) { ctx.save(); ctx.translate(-2 + sd * 6, -19); ctx.rotate(sd * (.45 + fl)); ctx.beginPath(); ctx.ellipse(0, -11, 10, 14, 0, 0, TAU); ctx.fill(); ctx.stroke(); ctx.restore(); }
+  ctx.fillStyle = '#3a2010';
+  for (const [lx, ly, lr] of [[-12, 22, .25], [-2, 25, 0], [9, 25, -.1], [17, 20, -.3]]) { ctx.save(); ctx.translate(lx, ly); ctx.rotate(lr); ctx.beginPath(); ctx.ellipse(0, 0, 3.6, 6.2, 0, 0, TAU); ctx.fill(); ctx.restore(); }
+  ctx.beginPath(); ctx.moveTo(-22, -3); ctx.lineTo(-31, 2); ctx.lineTo(-22, 7); ctx.closePath(); ctx.fill();
+  const bg = ctx.createRadialGradient(6, -6, 4, 0, 0, 26); bg.addColorStop(0, '#ffc531'); bg.addColorStop(1, '#eea211');
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(0, 0, 24, 0, TAU); ctx.fill();
+  ctx.save(); ctx.beginPath(); ctx.arc(0, 0, 24, 0, TAU); ctx.clip();
+  ctx.strokeStyle = '#3d2312'; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.arc(10, 2, 19, Math.PI * .42, Math.PI * 1.58); ctx.stroke();
+  ctx.beginPath(); ctx.arc(10, 2, 30, Math.PI * .42, Math.PI * 1.58); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,224,120,.7)';
+  for (const [ex, ey, er] of [[4, -8, .5], [13, -11, -.3], [-3, 6, .2]]) { ctx.beginPath(); ctx.ellipse(ex, ey, 2.2, 4, er, 0, TAU); ctx.fill(); }
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(90,50,10,.35)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, 24, 0, TAU); ctx.stroke();
+  ctx.fillStyle = '#3a1f10'; ctx.beginPath(); ctx.ellipse(8, 6, 6.4, 7.2, .3, 0, TAU); ctx.fill(); ctx.beginPath(); ctx.ellipse(17.5, -1, 5.2, 6, .2, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(6.5, 3.5, 1.8, 2.3, 0, 0, TAU); ctx.fill(); ctx.beginPath(); ctx.ellipse(16.3, -3.2, 1.5, 2, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+  if (bee.stun > 0) {
+    ctx.fillStyle = '#f5b700'; ctx.font = '800 16px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let k = 0; k < 3; k++) { const a = T * 6 + k * 2.09; ctx.fillText('✦', bee.x + Math.cos(a) * 20 * s, bee.y - 36 * s + Math.sin(a) * 5); }
+  }
+}
+
+/* ---------- Jogo ---------- */
+function burst(x, y) { for (let i = 0; i < 20; i++) { const a = Math.random() * TAU, sp = 50 + Math.random() * 130; particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, life: 1, c: i % 3 ? '255,200,40' : '255,160,170', r: 2.5 + Math.random() * 2.5 }); } }
+
+function update(dt) {
+  T += dt; const P = PHASES[phase];
+  wind = P.wind ? windDir * P.wind * (.35 + .65 * (windAt(T) + 1) / 2) : 0;
+  for (const s of streaks) { s.x += wind * 420 * dt; if (s.x > W + 140) s.x = -140; if (s.x < -140) s.x = W + 140; }
+  bee.wing += dt * 60; bee.stun = Math.max(0, bee.stun - dt); bee.inv = Math.max(0, bee.inv - dt);
+  const px = bee.x;
+  if (!P.wind) { const k = 1 - Math.pow(.0005, dt); bee.x += (bee.tx - bee.x) * k; bee.y += (bee.ty - bee.y) * k; bee.vx = (bee.x - px) / Math.max(dt, .001); bee.vy = 0; }
+  else {
+    let ax, ay;
+    const ks = 25 * clamp(1 - (T - lastMove - .15) / .35, 0, 1); // cursor parado: a abelha solta do cursor
+    if (bee.stun > 0) { ax = -bee.vx * 2.2; ay = -bee.vy * 2.2 + 60; } else { ax = (bee.tx - bee.x) * ks - bee.vx * 5; ay = (bee.ty - bee.y) * ks - bee.vy * 5; }
+    ax += wind * 800; ay += Math.sin(T * 1.7) * 90 * P.wind;
+    bee.vx += ax * dt; bee.vy += ay * dt; bee.x += bee.vx * dt; bee.y += bee.vy * dt;
+  }
+  if (bee.x < 12) { bee.x = 12; bee.vx = Math.abs(bee.vx) * .3; } if (bee.x > W - 12) { bee.x = W - 12; bee.vx = -Math.abs(bee.vx) * .3; }
+  if (bee.y < 14) { bee.y = 14; bee.vy = Math.abs(bee.vy) * .3; } if (bee.y > H - 30) { bee.y = H - 30; bee.vy = -Math.abs(bee.vy) * .3; }
+  if (Math.abs(bee.vx) > 30) bee.face = bee.vx > 0 ? 1 : -1;
+
+  pollIdx = -1; let feitas = 0;
+  flowers.forEach((f, i) => {
+    f.hx = f.x + (wind * 24 + Math.sin(T * 1.6 + f.ph) * 3) * f.hg; f.hy = f.y + Math.sin(T * 1.3 + f.ph) * 1.5;
+    if (f.done) { feitas++; return; }
+    if (!running) return;
+    const d = Math.hypot(bee.x - f.hx, bee.y - f.hy);
+    if (d < f.r + 16 && bee.stun <= 0) { f.prog += dt / .7; pollIdx = i; } else f.prog = Math.max(0, f.prog - dt * .9);
+    if (f.prog >= 1) { f.done = true; f.prog = 1; feitas++; burst(f.hx, f.hy); }
+  });
+  if (running) {
+    phaseTime += dt;
+    if (feitas === flowers.length) endPhase();
+  }
+  updateSpiders(dt);
+  if (P.hand && running) updateHand(dt);
+  $cont.textContent = feitas + '/' + flowers.length; $tempo.textContent = fmt(base + phaseTime);
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 220 * dt; p.life -= dt * 1.3; }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function draw() {
+  ctx.drawImage(bgC, 0, 0, W, H);
+  const a = Math.min(1, Math.abs(wind) * 1.4) * .35;
+  if (a > .02) {
+    ctx.strokeStyle = `rgba(110,170,160,${a})`; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    for (const s of streaks) { ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.bezierCurveTo(s.x + s.l * .3, s.y - 8, s.x + s.l * .6, s.y + 8, s.x + s.l * (wind > 0 ? 1 : -1), s.y); ctx.stroke(); }
+  }
+  const gy = H - 26; ctx.lineCap = 'round';
+  for (const l of lav) {
+    const sw = wind * 20 + Math.sin(T * 1.4 + l.ph) * 3, px = t => l.x + sw * t * t, py = t => gy - l.h * t;
+    ctx.strokeStyle = 'rgba(90,150,70,.75)'; ctx.lineWidth = 3.5; ctx.beginPath(); ctx.moveTo(l.x, gy); for (let t = .1; t <= 1.001; t += .15) ctx.lineTo(px(t), py(t)); ctx.stroke();
+    for (let i = 0; i < 9; i++) {
+      const t = .4 + i * .067, s = 1 - i * .06, col = LAVC[(i + l.k) % 3];
+      for (const d of [-1, 1]) { ctx.fillStyle = col[0]; ctx.strokeStyle = col[1]; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(px(t) + d * 8 * s, py(t), 9 * s, 5.5 * s, d * -.7, 0, TAU); ctx.fill(); ctx.stroke(); }
+    }
+  }
+  for (const f of flowers) {
+    const mx = f.x, my = (f.hy + gy) / 2;
+    ctx.strokeStyle = 'rgba(130,190,95,.45)'; ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(f.x, gy); ctx.quadraticCurveTo(mx, my, f.hx, f.hy); ctx.stroke();
+    ctx.strokeStyle = 'rgba(84,150,66,.85)'; ctx.lineWidth = 3.2; ctx.stroke();
+    for (const [t, d] of [[.42, 1], [.64, -1]]) {
+      const u = 1 - t, lx = u * u * f.x + 2 * u * t * mx + t * t * f.hx, ly = u * u * gy + 2 * u * t * my + t * t * f.hy;
+      ctx.save(); ctx.translate(lx, ly); ctx.rotate(d * -.6); ctx.fillStyle = 'rgba(120,185,85,.7)'; ctx.strokeStyle = 'rgba(70,130,55,.5)'; ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.ellipse(d * 15, 0, 16, 6.5, 0, 0, TAU); ctx.fill(); ctx.stroke(); ctx.restore();
+    }
+    const S = f.r * 3.4; ctx.save(); ctx.translate(f.hx, f.hy); ctx.rotate((f.hx - f.x) * .008);
+    ctx.drawImage(f.sp[f.done ? 1 : 0], -S / 2, -S / 2, S, S); ctx.restore();
+    if (!f.done && f.prog > 0) { ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(245,160,10,.95)'; ctx.beginPath(); ctx.arc(f.hx, f.hy, f.r * 1.28 + 6, -Math.PI / 2, -Math.PI / 2 + f.prog * TAU); ctx.stroke(); }
+  }
+  for (const s of spiders) if (s.st !== 'stuck' && s.st !== 'gone') drawSp(s);
+  ctx.drawImage(fgC, 0, 0, W, H);
+  drawWarn(); drawBee();
+  for (const s of spiders) if (s.st === 'stuck') drawSpider(s.x, s.y, -1.57, 1.3, true);
+  for (const p of particles) { ctx.fillStyle = `rgba(${p.c},${Math.max(0, p.life)})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill(); }
+  drawHand();
+}
+
+/* ---------- Fases e telas ---------- */
+function setupPhase(i) {
+  phase = i; running = false; phaseTime = 0; windDir = Math.random() < .5 ? -1 : 1; particles = []; base = times.slice(0, i).reduce((a, b) => a + b, 0);
+  buildFlowers(); const P = PHASES[i]; spiders = [];
+  for (let k = 0; k < P.spiders; k++) { const s = mkSpider(); spiders.push(s); s.home = pickHome(s, true); }
+  hand.st = 'idle'; hand.cd = (P.handCd || 9) * .8; bee.vx = bee.vy = 0; bee.stun = 0; bee.inv = 0;
+  $fase.textContent = i + 1; showIntro();
+}
+function showIntro() {
+  const P = PHASES[phase], best = getBest();
+  card.innerHTML = `<div class="tag">Fase ${phase + 1} de ${PHASES.length}</div><h1>${P.nome}</h1><p>${P.desc}</p>` +
+    (phase === 0 ? '<p>Mova a abelha com o mouse (ou o dedo) e fique sobre cada flor até o anel dourado fechar. Poline tudo o mais rápido que puder!</p>' : '') +
+    (phase === 0 && best ? `<p>Seu recorde: <b>${fmt(best)} s</b></p>` : '') +
+    `<button id="go">${phase === 0 ? 'Jogar' : 'Começar fase'}</button>`;
+  overlay.classList.remove('hide'); $('go').onclick = () => { running = true; lastMove = T; overlay.classList.add('hide'); };
+}
+function endPhase() {
+  running = false; times[phase] = phaseTime; hand.st = 'idle';
+  setTimeout(() => phase < PHASES.length - 1 ? showPhaseEnd() : showFinal(), 800);
+}
+function showPhaseEnd() {
+  const tot = times.reduce((a, b) => a + b, 0), nx = PHASES[phase + 1];
+  card.innerHTML = `<h1>🌻 Fase ${phase + 1} concluída!</h1><div class="big">${fmt(times[phase])} s</div><p>Tempo total: <b>${fmt(tot)} s</b></p><p>Próxima: <b>${nx.nome}</b></p><button id="go">Próxima fase</button>`;
+  overlay.classList.remove('hide'); $('go').onclick = () => setupPhase(phase + 1);
+}
+function showFinal() {
+  const tot = times.reduce((a, b) => a + b, 0), best = getBest(), rec = !best || tot < best; if (rec) setBest(tot);
+  card.innerHTML = `<h1>${rec ? '🏆 Novo recorde!' : '🌻 Jardim polinizado!'}</h1><p>Tempo total</p><div class="big">${fmt(tot)} s</div>` +
+    times.map((t, i) => `<div class="row"><span>${i + 1}. ${PHASES[i].nome}</span><b>${fmt(t)} s</b></div>`).join('') +
+    `<p>Melhor tempo: <b>${fmt(rec ? tot : best)} s</b></p><button id="go">Jogar de novo</button>`;
+  overlay.classList.remove('hide'); $('go').onclick = () => { times = []; setupPhase(0); };
+}
+
+/* ---------- Entrada e loop ---------- */
+function point(e) {
+  const nx = e.clientX, ny = Math.max(0, e.clientY - (e.pointerType === 'mouse' ? 0 : 52));
+  if (Math.hypot(nx - ptrX, ny - ptrY) > 3) { lastMove = T; ptrX = nx; ptrY = ny; }
+  bee.tx = nx; bee.ty = ny;
+}
+addEventListener('pointermove', point); addEventListener('pointerdown', point);
+function resize() {
+  const oW = W, oH = H; dpr = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  bee.s = W < 520 ? .85 : 1; buildBg(); buildLav();
+  if (oW && flowers.length) flowers.forEach(f => { f.x *= W / oW; f.y *= H / oH; });
+}
+addEventListener('resize', resize);
+function frame(now) { const dt = Math.min((now - last) / 1000, .05); last = now; update(dt); draw(); requestAnimationFrame(frame); }
+resize(); bee.x = bee.tx = W / 2; bee.y = bee.ty = H * .35; setupPhase(0);
+requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
